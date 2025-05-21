@@ -8,7 +8,7 @@
 
 #include <torch/extension.h>
 
-#include <THC/THCAtomics.cuh>
+//#include <THC/THCAtomics.cuh>
 
 // input features (n, c), indices (N, 8), weight (N, 8) -> output features (N,
 // c)
@@ -60,7 +60,8 @@ void devoxelize_backward_kernel(
 #pragma unroll
     for (int k = 0; k < 8; k++) {
       if (indices_[k] >= 0)
-        atomicAdd(&bottom_grad[indices_[k] * c + j], weight_[k] * cur_top_grad);
+        dpct::atomic_fetch_add<sycl::access::address_space::generic_space>(
+            &bottom_grad[indices_[k] * c + j], weight_[k] * cur_top_grad);
     }
   }
 }
@@ -76,12 +77,37 @@ at::Tensor devoxelize_forward_cuda(const at::Tensor feat,
   at::Tensor out =
       torch::zeros({N, c}, at::device(feat.device()).dtype(feat.dtype()));
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-      feat.scalar_type(), "devoxelize_forward_cuda", ([&] {
-        devoxelize_forward_kernel<scalar_t><<<N, c>>>(
-            N, c, indices.data_ptr<int>(), weight.data_ptr<scalar_t>(),
-            feat.data_ptr<scalar_t>(), out.data_ptr<scalar_t>());
-      }));
+  /*
+  DPCT1038:0: When the kernel function name is used as a macro argument, the
+  migration result may be incorrect. You need to verify the definition of the
+  macro.
+  */
+  AT_DISPATCH_FLOATING_TYPES_AND_HALF(feat.scalar_type(),
+                                      "devoxelize_forward_cuda", ([&] {
+        /*
+        DPCT1049:1: The work-group size passed to the SYCL kernel may exceed the
+        limit. To get the device limit, query info::device::max_work_group_size.
+        Adjust the work-group size if needed.
+        */
+    dpct::has_capability_or_fail(dpct::get_in_order_queue().get_device(),
+                                 {sycl::aspect::fp64});
+
+    dpct::get_in_order_queue().submit([&](sycl::handler &cgh) {
+      const int *indices_data_ptr_int_ct2 = indices.data_ptr<int>();
+      auto weight_data_ptr_scalar_t_ct3 = weight.data_ptr<scalar_t>();
+      auto feat_data_ptr_scalar_t_ct4 = feat.data_ptr<scalar_t>();
+      auto out_data_ptr_scalar_t_ct5 = out.data_ptr<scalar_t>();
+
+      cgh.parallel_for(
+          sycl::nd_range<3>(sycl::range<3>(1, 1, N) * sycl::range<3>(1, 1, c),
+                            sycl::range<3>(1, 1, c)),
+          [=](sycl::nd_item<3> item_ct1) {
+            devoxelize_forward_kernel<scalar_t>(
+                N, c, indices_data_ptr_int_ct2, weight_data_ptr_scalar_t_ct3,
+                feat_data_ptr_scalar_t_ct4, out_data_ptr_scalar_t_ct5);
+          });
+    });
+                                      }));
 
   return out;
 }
@@ -96,12 +122,38 @@ at::Tensor devoxelize_backward_cuda(const at::Tensor top_grad,
   at::Tensor bottom_grad = torch::zeros(
       {n, c}, at::device(top_grad.device()).dtype(top_grad.dtype()));
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-      top_grad.scalar_type(), "devoxelize_backward_cuda", ([&] {
-        devoxelize_backward_kernel<scalar_t><<<N, c>>>(
-            N, n, c, indices.data_ptr<int>(), weight.data_ptr<scalar_t>(),
-            top_grad.data_ptr<scalar_t>(), bottom_grad.data_ptr<scalar_t>());
-      }));
+  /*
+  DPCT1038:2: When the kernel function name is used as a macro argument, the
+  migration result may be incorrect. You need to verify the definition of the
+  macro.
+  */
+  AT_DISPATCH_FLOATING_TYPES_AND_HALF(top_grad.scalar_type(),
+                                      "devoxelize_backward_cuda", ([&] {
+        /*
+        DPCT1049:3: The work-group size passed to the SYCL kernel may exceed the
+        limit. To get the device limit, query info::device::max_work_group_size.
+        Adjust the work-group size if needed.
+        */
+    dpct::has_capability_or_fail(dpct::get_in_order_queue().get_device(),
+                                 {sycl::aspect::fp64});
+
+    dpct::get_in_order_queue().submit([&](sycl::handler &cgh) {
+      const int *indices_data_ptr_int_ct3 = indices.data_ptr<int>();
+      auto weight_data_ptr_scalar_t_ct4 = weight.data_ptr<scalar_t>();
+      auto top_grad_data_ptr_scalar_t_ct5 = top_grad.data_ptr<scalar_t>();
+      auto bottom_grad_data_ptr_scalar_t_ct6 = bottom_grad.data_ptr<scalar_t>();
+
+      cgh.parallel_for(
+          sycl::nd_range<3>(sycl::range<3>(1, 1, N) * sycl::range<3>(1, 1, c),
+                            sycl::range<3>(1, 1, c)),
+          [=](sycl::nd_item<3> item_ct1) {
+            devoxelize_backward_kernel<scalar_t>(
+                N, n, c, indices_data_ptr_int_ct3, weight_data_ptr_scalar_t_ct4,
+                top_grad_data_ptr_scalar_t_ct5,
+                bottom_grad_data_ptr_scalar_t_ct6);
+          });
+    });
+                                      }));
 
   return bottom_grad;
 }
